@@ -1,0 +1,5 @@
+objs/
+objs.debug/
+host/rbftool
+host/rbfcheck
+tests/work/
