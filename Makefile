@@ -8,6 +8,8 @@
 #   make test       run the host test suite
 #
 
+VER	   ?= 1.0+
+
 AMIGA_GCC  ?= /opt/amiga162rc25
 AMIGA_BIN  := $(AMIGA_GCC)/bin
 CC_AMIGA   := $(AMIGA_BIN)/m68k-amigaos-gcc
@@ -82,5 +84,17 @@ test: host
 
 clean:
 	rm -rf objs objs.debug $(HOST_TOOLS) tests/work
+
+PROG	:= os9_rbf_handler
+PROGVER := $(PROG)_$(VER)
+
+lha:
+	@echo Building $(PROGVER).lha
+	$(QUIET)rm -rf $(PROG).zip $(PROGVER)
+	$(QUIET)mkdir $(PROGVER)
+	$(QUIET)cp -p $(HANDLER) README.md $(PROGVER)/
+	$(QUIET)lha -aq2 $(PROGVER).lha $(PROGVER)
+
+release: lha
 
 .PHONY: all handler host test clean
