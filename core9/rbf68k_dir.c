@@ -23,8 +23,9 @@ to_upper(int c)
 }
 
 /*
- * A name is valid if F$PrsNam accepts it: 1 to 28 of the characters
- * A-Z a-z 0-9 _ . $ including at least one letter or digit.
+ * A name is valid if F$PrsNam accepts it: 1 to 28 (OS-9/6809: 29) of
+ * the characters A-Z a-z 0-9 _ . $ including at least one letter or
+ * digit.
  */
 int
 rbf_valid_name(fs_volume_t *v, const char *name)
@@ -32,7 +33,6 @@ rbf_valid_name(fs_volume_t *v, const char *name)
     int len;
     int alnum = 0;
 
-    (void) v;
     for (len = 0; name[len] != '\0'; len++) {
         int c = (unsigned char) name[len];
         if (is_alnum(c))
@@ -40,7 +40,7 @@ rbf_valid_name(fs_volume_t *v, const char *name)
         else if ((c != '_') && (c != '.') && (c != '$'))
             return (FS_EBADNAME);
     }
-    if ((len == 0) || (len > RBF_NAME_MAX) || !alnum)
+    if ((len == 0) || (len > RVOL(v)->name_len) || !alnum)
         return (FS_EBADNAME);
     return (FS_OK);
 }
@@ -79,11 +79,11 @@ rbf_encode_name(const char *src, uint8_t *dst, int maxlen)
 
 /* Case-insensitive comparison of an on-disk name with a C string */
 static int
-name_matches(const uint8_t *ent, const char *name)
+name_matches(const rbf_vol_t *vol, const uint8_t *ent, const char *name)
 {
     int i;
 
-    for (i = 0; i < DIR_NAME_LEN; i++) {
+    for (i = 0; i < vol->name_len; i++) {
         int c = ent[i] & 0x7f;
         if ((ent[i] == 0) ||
             (to_upper(c) != to_upper((unsigned char) name[i])))
@@ -170,15 +170,15 @@ dir_find(rbf_vol_t *vol, rbf_node_t *dn, const char *name, uint32_t node,
         if (ent[0] == 0)
             found = 0;
         else if (name != NULL)
-            found = name_matches(ent, name);
+            found = name_matches(vol, ent, name);
         else
-            found = !is_dot_entry(ent) && (get32(ent + DIR_FD) == node);
+            found = !is_dot_entry(ent) && (dir_ent_fd(vol, ent) == node);
         if (found) {
             *posp = pos;
             if (lsnp != NULL)
-                *lsnp = get32(ent + DIR_FD);
+                *lsnp = dir_ent_fd(vol, ent);
             if (namebuf != NULL)
-                rbf_decode_name(ent, DIR_NAME_LEN, namebuf);
+                rbf_decode_name(ent, vol->name_len, namebuf);
         }
         cache_put(&vol->cache, b, 0);
         if (found)
@@ -240,11 +240,10 @@ dir_add(rbf_vol_t *vol, rbf_node_t *dn, const char *name, uint32_t lsn)
             break;
     }
 
-    rc = rbf_encode_name(name, ent, DIR_NAME_LEN);
+    rc = rbf_encode_name(name, ent, vol->name_len);
     if (rc != FS_OK)
         return (rc);
-    memset(ent + DIR_NAME_LEN, 0, DIR_ENT_SIZE - DIR_NAME_LEN);
-    put32(ent + DIR_FD, lsn);
+    dir_ent_set_fd(vol, ent, lsn);
 
     if (pos + DIR_ENT_SIZE > size) {
         uint32_t need = (pos + DIR_ENT_SIZE + vol->sector_size - 1) >>
@@ -433,9 +432,9 @@ rbf_readdir(fs_volume_t *v, fs_node_t dir, uint32_t *cookie, fs_stat_t *st)
         if (rc != FS_OK)
             break;
         skip = (ent[0] == 0) || is_dot_entry(ent);
-        lsn  = get32(ent + DIR_FD);
+        lsn  = dir_ent_fd(vol, ent);
         if (!skip)
-            rbf_decode_name(ent, DIR_NAME_LEN, st->name);
+            rbf_decode_name(ent, vol->name_len, st->name);
         cache_put(&vol->cache, b, 0);
         rc = FS_ENOENT;
         if (skip)
@@ -529,10 +528,10 @@ rbf_create(fs_volume_t *v, fs_node_t dir, const char *name, uint16_t attr,
         uint8_t ents[2 * DIR_ENT_SIZE];
 
         memset(ents, 0, sizeof (ents));
-        rbf_encode_name("..", ents, DIR_NAME_LEN);
-        put32(ents + DIR_FD, dn->lsn);
-        rbf_encode_name(".", ents + DIR_ENT_SIZE, DIR_NAME_LEN);
-        put32(ents + DIR_ENT_SIZE + DIR_FD, lsn);
+        rbf_encode_name("..", ents, vol->name_len);
+        dir_ent_set_fd(vol, ents, dn->lsn);
+        rbf_encode_name(".", ents + DIR_ENT_SIZE, vol->name_len);
+        dir_ent_set_fd(vol, ents + DIR_ENT_SIZE, lsn);
         rc = node_grow(vol, nn, 1, 1);
         if (rc == FS_OK)
             rc = node_write_bytes(vol, nn, 0, ents, sizeof (ents), 0);
@@ -687,9 +686,8 @@ rbf_rename(fs_volume_t *v, fs_node_t sdir, const char *sname,
     if (ddn == sdn) {
         uint8_t ent[DIR_ENT_SIZE];
 
-        rc = rbf_encode_name(dname, ent, DIR_NAME_LEN);
-        memset(ent + DIR_NAME_LEN, 0, DIR_ENT_SIZE - DIR_NAME_LEN);
-        put32(ent + DIR_FD, lsn);
+        rc = rbf_encode_name(dname, ent, vol->name_len);
+        dir_ent_set_fd(vol, ent, lsn);
         if (rc == FS_OK)
             rc = dir_write_entry(vol, sdn, spos, ent);
         if (rc == FS_OK)
@@ -711,9 +709,8 @@ rbf_rename(fs_volume_t *v, fs_node_t sdir, const char *sname,
             uint32_t ppos;
             if (dir_find(vol, nn, "..", 0, &ppos, NULL, NULL) == FS_OK) {
                 uint8_t ent[DIR_ENT_SIZE];
-                rbf_encode_name("..", ent, DIR_NAME_LEN);
-                memset(ent + DIR_NAME_LEN, 0, DIR_ENT_SIZE - DIR_NAME_LEN);
-                put32(ent + DIR_FD, ddn->lsn);
+                rbf_encode_name("..", ent, vol->name_len);
+                dir_ent_set_fd(vol, ent, ddn->lsn);
                 rc = dir_write_entry(vol, nn, ppos, ent);
             }
         }

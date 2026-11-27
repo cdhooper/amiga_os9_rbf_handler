@@ -1003,28 +1003,34 @@ action_inhibit(handler_t *h)
  * Chooses the filesystem Format writes from the DOS type: the one in the
  * packet if it is one of ours, otherwise the one of the mount entry or
  * partition (Format sends DOS\x types for its OFS/FFS options).
- * ID_OS9K_DISK_BE and ID_OS9K_DISK_LE give OS-9000; anything else gives
- * OS-9/68k.  Mounting does not look at the DOS type.
+ * OS9\0 is OS-9/6809, OS9\2 and OS9\3 are OS-9000 big- and
+ * little-endian; anything else gives OS-9/68k.  Options in the volume
+ * name override it.  Mounting does not look at the DOS type.
  */
 static uint8_t
 format_type(handler_t *h, ULONG dostype)
 {
     struct DosEnvec *de = BADDR(h->fssm->fssm_Environ);
 
-    if (((dostype & 0xffffff00UL) != (ID_OS9_DISK & 0xffffff00UL)) &&
+    if (((dostype & ID_OS9_MASK) != (ID_OS9_DISK & ID_OS9_MASK)) &&
         (de != NULL) && (de->de_TableSize >= DE_DOSTYPE))
         dostype = de->de_DosType;
     switch (dostype) {
-        case ID_OS9K_DISK_BE: return (FS_FMT_OS9K_BE);
-        case ID_OS9K_DISK_LE: return (FS_FMT_OS9K_LE);
-        default:              return (FS_FMT_OS9);
+        case ID_OS9_6809_DISK: return (FS_FMT_OS9_6809);
+        case ID_OS9K_DISK_BE:  return (FS_FMT_OS9K_BE);
+        case ID_OS9K_DISK_LE:  return (FS_FMT_OS9K_LE);
+        default:               return (FS_FMT_OS9);
     }
 }
 
+/*
+ * Format: ARG1 is the volume name, optionally followed by options
+ * ("Name,6809,half", see fs_parse_format_opts()); ARG2 the DOS type.
+ */
 static LONG
 action_format(handler_t *h)
 {
-    char             name[FS_VOLNAME_MAX + 2];
+    char             name[256];
     fs_format_opts_t opts;
     LONG             err;
     int              rc;
@@ -1033,19 +1039,28 @@ action_format(handler_t *h)
         return (fail(h, ERROR_OBJECT_IN_USE));
     if ((err = check_writable(h)) != 0)
         return (fail(h, err));
-    volume_dismount(h, 0);
 
     bstr_to_cstr(ARG1, name, sizeof (name));
     memset(&opts, 0, sizeof (opts));
-    opts.name              = name;
     opts.sectors_per_track = h->geo.blocks_per_track;
     opts.heads             = h->geo.heads;
     opts.cylinders         = h->geo.high_cyl - h->geo.low_cyl + 1;
     opts.fs_type           = format_type(h, (ULONG) ARG2);
+    if (fs_parse_format_opts(name, &opts) != FS_OK) {
+        debugf("rbf: bad format option\n");
+        return (fail(h, ERROR_BAD_TEMPLATE));
+    }
+    debugf("rbf: format \"%s\" type %d ssize %lu cluster %lu half %d\n",
+           opts.name, opts.fs_type, (unsigned long) opts.sector_size,
+           (unsigned long) opts.cluster, opts.half);
+
+    volume_dismount(h, 0);
     rc = fs_format(&h->dev.bd, &opts);
     amigadev_motor_off(&h->dev);
     if (!h->inhibit)
         volume_check_media(h);
+    if ((rc == FS_EINVAL) || (rc == FS_ESECTSIZE))
+        return (fail(h, ERROR_BAD_TEMPLATE));   /* Options this type lacks */
     if (rc != FS_OK)
         return (fail(h, fs_error_to_dos(rc)));
     return (DOSTRUE);

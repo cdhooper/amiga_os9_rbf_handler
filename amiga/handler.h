@@ -1,5 +1,6 @@
 /*
- * OS-9 RBF filesystem handler for AmigaOS (OS-9/68k and OS-9000 RBF)
+ * OS-9 RBF filesystem handler for AmigaOS (OS-9/6809, OS-9/68k and
+ * OS-9000 RBF)
  */
 
 #ifndef _HANDLER_H
@@ -15,16 +16,22 @@
 #include "amigadev.h"
 
 #define HANDLER_NAME    "os9-rbf-handler"
-#define ID_OS9_DISK     0x4f533900UL    /* 'OS9\0': OS-9/68k RBF */
-#define ID_OS9K_DISK_BE 0x4f533901UL    /* 'OS9\1': OS-9000, big-endian */
-#define ID_OS9K_DISK_LE 0x4f533902UL    /* 'OS9\2': OS-9000, little-endian */
+#define ID_OS9_6809_DISK 0x4f533900UL   /* 'OS9\0': OS-9/6809 RBF */
+#define ID_OS9_DISK     0x4f533901UL    /* 'OS9\1': OS-9/68k RBF */
+#define ID_OS9K_DISK_BE 0x4f533902UL    /* 'OS9\2': OS-9000, big-endian */
+#define ID_OS9K_DISK_LE 0x4f533903UL    /* 'OS9\3': OS-9000, little-endian */
+#define ID_OS9_MASK     0xffffff00UL    /* 'OS9' */
 
 /* DOS type of a mounted filesystem (fs_volinfo.fs_type) */
 static inline ULONG
 fs_type_to_id(uint8_t fs_type)
 {
-    return ((fs_type == FS_FMT_OS9K_BE) ? ID_OS9K_DISK_BE :
-            (fs_type == FS_FMT_OS9K_LE) ? ID_OS9K_DISK_LE : ID_OS9_DISK);
+    switch (fs_type) {
+        case FS_FMT_OS9_6809: return (ID_OS9_6809_DISK);
+        case FS_FMT_OS9K_BE:  return (ID_OS9K_DISK_BE);
+        case FS_FMT_OS9K_LE:  return (ID_OS9K_DISK_LE);
+        default:              return (ID_OS9_DISK);
+    }
 }
 
 #ifndef ID_BUSY

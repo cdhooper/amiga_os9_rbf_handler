@@ -65,6 +65,7 @@
 
 #define ID_NAME_LEN     32
 #define R9K_IDB_SYNC    0xadb0b0adUL
+#define R9K_PC_ID_OFFSET 512    /* x86: ID block after the boot sector */
 #define R9K_BIG_END     'B'
 #define R9K_LITTLE_END  'L'
 #define IDF_EPOCH70     0x0001  /* Times count from 1970 (else 1980) */

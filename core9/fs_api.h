@@ -12,9 +12,11 @@
  * position (byte offset within their directory), which is what
  * fs_readdir() iterates over.
  *
- * Each backend (OS-9/68k RBF in core9/, OS-9000 RBF in core9k/)
- * provides a struct fs_ops.  fs_mount() probes the backends and returns
- * a volume whose ops pointer is used by the inline wrappers below.
+ * Each backend (OS-9/68k and OS-9/6809 RBF in core9/, OS-9000 RBF in
+ * core9k/) provides a struct fs_ops.  fs_mount() probes the backends and returns
+ * a volume whose ops pointer is used by the inline wrappers below.  A
+ * disk with an MBR partition table is searched for a partition holding
+ * an RBF filesystem.
  * fs_format() writes the filesystem named by fs_format_opts.fs_type.
  *
  * All functions return FS_OK (0) or one of the FS_E* error codes.
@@ -61,6 +63,7 @@ enum fs_error {
 #define FS_FMT_OS9      0       /* OS-9/68k RBF (big-endian) */
 #define FS_FMT_OS9K_BE  1       /* OS-9000 RBF, big-endian */
 #define FS_FMT_OS9K_LE  2       /* OS-9000 RBF, little-endian */
+#define FS_FMT_OS9_6809 3       /* OS-9/6809 RBF (NitrOS-9) */
 
 /* Object types */
 #define FS_TYPE_FILE    1
@@ -116,11 +119,16 @@ typedef struct fs_volinfo {
 typedef struct fs_format_opts {
     const char *name;           /* Volume name */
     uint32_t    cluster;        /* Sectors per bitmap bit, 0 = automatic */
-    uint32_t    sectors_per_track;  /* Recorded in LSN 0 (informational) */
+    uint32_t    sectors_per_track;  /* In device blocks (informational) */
     uint32_t    heads;              /* Recorded in LSN 0 format byte */
     uint32_t    cylinders;          /* Recorded in LSN 0 format byte */
     uint32_t    disk_id;        /* 0 = derive from the current time */
+    uint32_t    sector_size;    /* Filesystem sector size, 0 = default */
+    uint16_t    owner_group;    /* Owner of the root directory */
+    uint16_t    owner_user;
     uint8_t     fs_type;        /* FS_FMT_*: which filesystem to write */
+    uint8_t     half;           /* One sector per device block (6809) */
+    uint8_t     disk_id_set;    /* disk_id given (may be 0) */
 } fs_format_opts_t;
 
 typedef struct fs_volume fs_volume_t;
@@ -162,9 +170,12 @@ struct fs_ops {
 };
 
 /* Common head of every backend's volume structure */
+struct blockmap;
+
 struct fs_volume {
     const struct fs_ops *ops;
     blockdev_t          *dev;
+    struct blockmap     *part;  /* MBR partition map (fs_mount() owns) */
 };
 
 /* Common head of every backend's open file structure */
@@ -176,14 +187,43 @@ struct fs_file {
 };
 
 /*
- * fs_mount() tries each backend on the device.  cache_buffers is the
- * number of sector buffers in the volume's cache.  Returns FS_ENOTFS if
- * no backend recognizes the media.
+ * fs_mount() tries each backend on the device.  If none recognizes it
+ * and block 0 is a valid MBR, each primary partition is tried in turn
+ * and the first holding an RBF filesystem is mounted.  cache_buffers is
+ * the number of sector buffers in the volume's cache.  Returns
+ * FS_ENOTFS if no backend recognizes the media.
  */
 int fs_mount(blockdev_t *dev, unsigned cache_buffers, fs_volume_t **volp);
 
-/* Writes an empty filesystem of type opts->fs_type over the whole device */
+/* Writes back (unless discard) and frees the volume */
+int fs_unmount(fs_volume_t *vol, int discard);
+
+/*
+ * Writes an empty filesystem of type opts->fs_type over the whole
+ * device.  The filesystem sector size is opts->sector_size, or by
+ * default 256 bytes for OS-9/6809 and the device block size otherwise;
+ * if it differs from the device's, I/O goes through a blockmap.  With
+ * opts->half (OS-9/6809 only), each 256-byte sector takes the first
+ * half of its own device block, as CoCo hard disk drivers store them.
+ */
 int fs_format(blockdev_t *dev, const fs_format_opts_t *opts);
+
+/*
+ * Splits format options from a volume name, in place: "Name,opt,opt..."
+ * (the delimiter may be ',', '|' or '/').  name is cut at the first
+ * delimiter and opts->name set to it; each option updates opts:
+ *
+ *   6809  68k  9k (os9k)  be  le           filesystem type
+ *   ssize=<n>   ss=<n>                     sector size in bytes
+ *   cluster=<n> cl=<n>                     sectors per cluster
+ *   id=<hex>                               disk ID
+ *   owner=<g>.<u>  owner=<n>  own=...      root directory owner
+ *   half                                   6809 half-sector layout
+ *
+ * Option names are not case sensitive; empty options are ignored.
+ * Returns FS_OK, or FS_EINVAL for an unknown option or a bad number.
+ */
+int fs_parse_format_opts(char *name, fs_format_opts_t *opts);
 
 const char *fs_strerror(int err);
 
@@ -201,8 +241,6 @@ fs_time_t fs_mktime(const fs_tm_t *tm);
 void      fs_gmtime(fs_time_t t, fs_tm_t *tm);
 
 /* Inline wrappers which dispatch through the volume's ops */
-static inline int fs_unmount(fs_volume_t *v, int discard)
-    { return (v->ops->unmount(v, discard)); }
 static inline int fs_sync(fs_volume_t *v)
     { return (v->ops->sync(v)); }
 static inline int fs_volinfo(fs_volume_t *v, fs_volinfo_t *i)

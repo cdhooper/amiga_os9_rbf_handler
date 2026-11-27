@@ -13,10 +13,12 @@
  *   -r           read-only
  *   -t <secs>    use a fixed "now" (fs_time_t) for reproducible images
  *   -v           log core diagnostics
- *   -f <type>    filesystem to format: os9 (default), os9k-be, os9k-le
+ *   -f <type>    filesystem to format: os9 or 68k (default), 6809,
+ *                os9k-be, os9k-le
  *
  * Commands (paths are relative to the root, '/' separated):
- *   format <name> [cluster]     write an empty filesystem
+ *   format <name>[,opts] [cluster]  write an empty filesystem; opts as
+ *                               for AmigaOS Format (fs_parse_format_opts)
  *   info | free
  *   ls [dir] | stat <path> | cat <path>
  *   get <path> <hostfile>       put <hostfile> <path>
@@ -134,7 +136,8 @@ cmd_info(void)
         return (rc);
     printf("type     %s\n", (vi.fs_type == FS_FMT_OS9K_LE) ?
            "OS-9000 little-endian" : (vi.fs_type == FS_FMT_OS9K_BE) ?
-           "OS-9000 big-endian" : "OS-9/68k");
+           "OS-9000 big-endian" : (vi.fs_type == FS_FMT_OS9_6809) ?
+           "OS-9/6809" : "OS-9/68k");
     printf("name     %s\n", vi.name);
     printf("sectors  %lu x %lu bytes\n", (unsigned long) vi.total_blocks,
            (unsigned long) vi.block_size);
@@ -386,14 +389,27 @@ static int
 cmd_format(int argc, char **argv)
 {
     fs_format_opts_t opts;
+    char             name[256];
+    int              rc;
 
     memset(&opts, 0, sizeof (opts));
-    opts.name = (argc > 1) ? argv[1] : "OS-9";
-    opts.cluster = (argc > 2) ? strtoul(argv[2], NULL, 0) : 0;
     opts.sectors_per_track = 11;
     opts.heads = 2;
     opts.cylinders = 80;
     opts.fs_type = fs_type;
+    if (argc > 1) {
+        /* "Name,option,..." as given to the handler by AmigaOS Format */
+        snprintf(name, sizeof (name), "%s", argv[1]);
+        rc = fs_parse_format_opts(name, &opts);
+        if (rc != FS_OK) {
+            fprintf(stderr, "format: bad option in \"%s\"\n", argv[1]);
+            return (rc);
+        }
+    } else {
+        opts.name = "OS-9";
+    }
+    if (argc > 2)
+        opts.cluster = strtoul(argv[2], NULL, 0);
     return (fs_format(&hdev.dev, &opts));
 }
 
@@ -516,8 +532,11 @@ main(int argc, char **argv)
             case 't': hostdev_fixed_time = strtoul(optarg, NULL, 0); break;
             case 'v': hostdev_verbose = 1; break;
             case 'f':
-                if (strcmp(optarg, "os9") == 0)
+                if ((strcmp(optarg, "os9") == 0) ||
+                    (strcmp(optarg, "68k") == 0))
                     fs_type = FS_FMT_OS9;
+                else if (strcmp(optarg, "6809") == 0)
+                    fs_type = FS_FMT_OS9_6809;
                 else if (strcmp(optarg, "os9k-be") == 0)
                     fs_type = FS_FMT_OS9K_BE;
                 else if (strcmp(optarg, "os9k-le") == 0)

@@ -2,7 +2,7 @@
  * OS-9 RBF filesystem handler for AmigaOS: startup and main loop
  *
  * DOS starts the handler as a process when its device (from a mountlist
- * or an RDB partition with DosType 'OS9\0', 'OS9\1' or 'OS9\2') is
+ * or an RDB partition with DosType 'OS9\0' to 'OS9\3') is
  * first used, and sends a startup packet with the FileSysStartupMsg.
  * The handler opens the exec device, mounts the volume if a disk is
  * present, and then serves packets until ACTION_DIE.

@@ -46,7 +46,19 @@ class Model:
         return [self.join(d, n) for n in self.dirs[d].values()]
 
 
-NAME_MAX = 28                   # 43 for OS-9000 (set by main)
+NAME_MAX = 28                   # 29 for 6809, 43 for OS-9000 (set by main)
+
+
+def fmt_opts(a):
+    """Format options appended to the volume name"""
+    return ',half' if a.half else ''
+
+
+def check_args(a):
+    """rbfcheck options for the image's layout"""
+    if a.fs == '6809':
+        return ['-H', str(a.sector)] if a.half else ['-s', '256', '-6']
+    return ['-s', str(a.sector)]
 
 
 def rand_name(rng):
@@ -91,8 +103,8 @@ class Tester:
         return p
 
     def check(self):
-        r = subprocess.run([RBFCHECK, '-s', str(self.a.sector), '-o',
-                            str(self.a.offset), self.img],
+        r = subprocess.run([RBFCHECK] + check_args(self.a) +
+                           ['-o', str(self.a.offset), self.img],
                            capture_output=True, text=True)
         if r.returncode != 0:
             raise Fail('rbfcheck:\n' + r.stdout + r.stderr)
@@ -291,7 +303,8 @@ class Tester:
         if not self.a.image:
             with open(self.img, 'wb') as f:
                 f.truncate(sectors * self.a.sector)
-        r = self.tool('format', 'Stress', str(self.a.cluster))
+        r = self.tool('format', 'Stress' + fmt_opts(self.a),
+                      str(self.a.cluster))
         if r.returncode != 0:
             raise Fail('format: ' + r.stderr)
         self.check()
@@ -350,7 +363,7 @@ def fill_test(args):
     t = Tester(args)
     with open(t.img, 'wb') as f:
         f.truncate(args.sectors * args.sector)
-    r = t.tool('format', 'Full', str(args.cluster))
+    r = t.tool('format', 'Full' + fmt_opts(args), str(args.cluster))
     if r.returncode != 0:
         raise Fail('format: ' + r.stderr)
     free0 = t.free()
@@ -384,8 +397,10 @@ def main():
     ap.add_argument('--ops', type=int, default=1000)
     ap.add_argument('--seed', type=int, default=1)
     ap.add_argument('--fill', action='store_true')
-    ap.add_argument('--fs', default='os9', choices=['os9', 'os9k-be', 'os9k-le'],
+    ap.add_argument('--fs', default='os9', choices=['os9', '6809', 'os9k-be', 'os9k-le'],
                     help='filesystem to format')
+    ap.add_argument('--half', action='store_true',
+                    help='6809 half-sector layout (one sector per block)')
     ap.add_argument('--keep', action='store_true',
                     help='leave the final tree in place')
     ap.add_argument('--image', help='use this image (with --offset)')
@@ -394,7 +409,9 @@ def main():
     ap.add_argument('workdir')
     a = ap.parse_args()
     global NAME_MAX
-    if a.fs != 'os9':
+    if a.fs == '6809':
+        NAME_MAX = 29
+    elif a.fs != 'os9':
         NAME_MAX = 43
     try:
         if a.fill:

@@ -1,6 +1,6 @@
 /*
- * OS-9/68k RBF (Random Block File manager) filesystem
- * ---------------------------------------------------
+ * OS-9/68k and OS-9/6809 RBF (Random Block File manager) filesystem
+ * -----------------------------------------------------------------
  * On-disk layout (all multi-byte values are big-endian, and most are
  * byte aligned for historical 6809 reasons):
  *
@@ -17,11 +17,17 @@
  * character has bit 7 set; unused bytes are zero; a zero first byte
  * marks a free entry) and a 4-byte FD LSN.  The first two entries of
  * every directory are ".." and ".".
+ *
+ * OS-9/6809 (and NitrOS-9) disks have the same layout with these
+ * differences: sectors are always 256 bytes, LSN 0 ends at DD_RES2 (no
+ * sync code, sector size or bitmap LSN fields), and a directory entry
+ * has 29 bytes of name followed by a 3-byte FD LSN.
  */
 
 #ifndef _RBF68K_H
 #define _RBF68K_H
 
+#include <string.h>
 #include "fs_api.h"
 #include "cache.h"
 #include "blockmap.h"
@@ -71,8 +77,9 @@
 #define DIR_ENT_SIZE    32
 #define DIR_NAME_LEN    28
 #define DIR_FD          28      /* 4: FD LSN */
+#define DIR_NAME_LEN_6809 29
+#define DIR_FD_6809     29      /* 3: FD LSN */
 
-#define RBF_NAME_MAX    DIR_NAME_LEN
 #define RBF_MAX_LSN     0xffffff        /* LSNs are 24 bits */
 #define RBF_MAX_MAP     0xffff          /* DD_MAP is 16 bits */
 
@@ -130,6 +137,8 @@ typedef struct rbf_vol {
     uint32_t    free_sectors;   /* Cached free count, ~0 if unknown */
     unsigned    max_segs;       /* Segment slots in an FD */
     uint8_t     read_only;
+    uint8_t     fs_type;        /* FS_FMT_OS9 or FS_FMT_OS9_6809 */
+    uint8_t     name_len;       /* Name bytes in a directory entry */
     rbf_node_t *nodes;
     uint8_t    *zero;           /* A sector of zeros */
     blockmap_t  map;            /* Sector size differs from the device */
@@ -143,6 +152,24 @@ typedef struct rbf_file {
 } rbf_file_t;
 
 #define RVOL(v) ((rbf_vol_t *) (v))
+
+/* FD LSN of a directory entry */
+static inline uint32_t dir_ent_fd(const rbf_vol_t *vol, const uint8_t *ent)
+{
+    return ((vol->fs_type == FS_FMT_OS9_6809) ? get24(ent + DIR_FD_6809) :
+            get32(ent + DIR_FD));
+}
+
+/* Sets the FD LSN of an entry, clearing the bytes after the name */
+static inline void dir_ent_set_fd(const rbf_vol_t *vol, uint8_t *ent,
+                                  uint32_t lsn)
+{
+    memset(ent + vol->name_len, 0, DIR_ENT_SIZE - vol->name_len);
+    if (vol->fs_type == FS_FMT_OS9_6809)
+        put24(ent + DIR_FD_6809, lsn);
+    else
+        put32(ent + DIR_FD, lsn);
+}
 
 /* rbf68k_vol.c */
 int  rbf68k_mount(blockdev_t *dev, unsigned cache_buffers, fs_volume_t **vp);

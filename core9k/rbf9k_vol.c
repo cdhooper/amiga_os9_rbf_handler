@@ -571,6 +571,11 @@ is_fd_block(const uint8_t *b)
  * code; anything else is FS_ENOTFS so that other backends can be tried.
  * The byte order is the ID block's end flag; volumes without one are
  * judged by which order gives a sensible block size.
+ *
+ * OS-9000 on x86 puts the ID block in the second 512-byte sector (the
+ * first holds the PC boot loader) and numbers blocks from there, so if
+ * block 0 has no sync code, byte offset 512 is tried, and I/O then goes
+ * through an offset blockmap.
  */
 int
 rbf9k_mount(blockdev_t *dev, unsigned cache_buffers, fs_volume_t **vp)
@@ -585,6 +590,7 @@ rbf9k_mount(blockdev_t *dev, unsigned cache_buffers, fs_volume_t **vp)
     uint32_t   seg_count;
     r9k_vol_t *vol = NULL;
     blockdev_t *vdev = dev;
+    uint32_t   base = 0;
     int        rc;
 
     *vp = NULL;
@@ -596,13 +602,19 @@ rbf9k_mount(blockdev_t *dev, unsigned cache_buffers, fs_volume_t **vp)
     if ((tmp == NULL) || (vol == NULL))
         goto fail;
 
-    rc = FS_EIO;
-    if (blockdev_read_bytes(dev, 0, ID_SIZE, idb, tmp) != 0)
-        goto fail;
-    rc = FS_ENOTFS;
-    if ((idb[0] != 0xad) || (idb[1] != 0xb0) || (idb[2] != 0xb0) ||
-        (idb[3] != 0xad))
-        goto fail;
+    for (;;) {
+        rc = FS_EIO;
+        if (blockdev_read_bytes(dev, base, ID_SIZE, idb, tmp) != 0)
+            goto fail;
+        rc = FS_ENOTFS;
+        if ((idb[0] == 0xad) && (idb[1] == 0xb0) && (idb[2] == 0xb0) &&
+            (idb[3] == 0xad))
+            break;
+        if ((base != 0) || (dev_bytes < 2 * R9K_PC_ID_OFFSET))
+            goto fail;
+        base = R9K_PC_ID_OFFSET;
+    }
+    dev_bytes -= base;
 
     if (idb[ID_ENDFLAG] == R9K_LITTLE_END) {
         vol->le = 1;
@@ -633,7 +645,7 @@ rbf9k_mount(blockdev_t *dev, unsigned cache_buffers, fs_volume_t **vp)
 
     /* The bitmap file: one segment, large enough for every block */
     rc = FS_EIO;
-    if (blockdev_read_bytes(dev, (uint64_t) vol->map_fd * bs, bs, fd,
+    if (blockdev_read_bytes(dev, base + (uint64_t) vol->map_fd * bs, bs, fd,
                             tmp) != 0)
         goto fail;
     rc = FS_ENOTFS;
@@ -648,7 +660,7 @@ rbf9k_mount(blockdev_t *dev, unsigned cache_buffers, fs_volume_t **vp)
 
     /* The root directory */
     rc = FS_EIO;
-    if (blockdev_read_bytes(dev, (uint64_t) vol->root * bs, bs, fd,
+    if (blockdev_read_bytes(dev, base + (uint64_t) vol->root * bs, bs, fd,
                             tmp) != 0)
         goto fail;
     rc = FS_ENOTFS;
@@ -656,7 +668,14 @@ rbf9k_mount(blockdev_t *dev, unsigned cache_buffers, fs_volume_t **vp)
         goto fail;
 
     rc = FS_ENOMEM;
-    if (bs != dss) {
+    if (base != 0) {
+        if (blockmap_init_offset(&vol->map, dev, bs, base, 0) != 0)
+            goto fail;
+        vol->mapped = 1;
+        vdev = &vol->map.bd;
+        fsp_log("rbf9k: ID block at byte %lu (PC disk)\n",
+                (unsigned long) base);
+    } else if (bs != dss) {
         if (blockmap_init(&vol->map, dev, bs) != 0)
             goto fail;
         vol->mapped = 1;
@@ -754,6 +773,8 @@ rbf9k_format(blockdev_t *dev, const fs_format_opts_t *opts)
         return (FS_ESECTSIZE);
     if (valid_volname(name) != FS_OK)
         return (FS_EBADNAME);
+    if (opts->cluster > 1)
+        return (FS_EINVAL);             /* The bitmap has a bit per block */
 
     map_bytes  = (total + 7) / 8;
     map_blocks = (map_bytes + bs - 1) / bs;
@@ -773,7 +794,7 @@ rbf9k_format(blockdev_t *dev, const fs_format_opts_t *opts)
     ev->bsize   = bs;
     now = r9k_from_time(ev, fsp_now());
     disk_id = opts->disk_id;
-    if (disk_id == 0)
+    if (!opts->disk_id_set && (disk_id == 0))
         disk_id = (fsp_now() * 2654435761UL) | 1;
 
     /* Bitmap: system area and root directory used, beyond media used */
@@ -811,6 +832,9 @@ rbf9k_format(blockdev_t *dev, const fs_format_opts_t *opts)
     /* Root directory FD: links are its ".", its "..", and the volume */
     format_fd(ev, buf, 2, FDF_DIR | FDF_PERMS, 3, 2 * DIR_ENT_SIZE,
               dir_lsn, 1, now);
+    r9_put16(ev, buf + FD_GROUP, opts->owner_group);
+    r9_put16(ev, buf + FD_OWNER, opts->owner_user);
+    r9k_set_parity(buf, bs);
     if (dev->write(dev, 2, 1, buf) != 0)
         goto done;
 
@@ -833,6 +857,8 @@ rbf9k_format(blockdev_t *dev, const fs_format_opts_t *opts)
     r9_put16(ev, buf + ID_BLKSIZE, bs);
     r9_put16(ev, buf + ID_FORMAT, fmt);
     r9_put16(ev, buf + ID_FLAGS, IDF_EPOCH70);
+    r9_put16(ev, buf + ID_GROUP, opts->owner_group);
+    r9_put16(ev, buf + ID_OWNER, opts->owner_user);
     r9_put32(ev, buf + ID_BITMAP, 1);
     r9_put32(ev, buf + ID_ROOTDIR, 2);
     r9_put32(ev, buf + ID_CTIME, now);

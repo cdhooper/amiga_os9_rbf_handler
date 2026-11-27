@@ -1,5 +1,6 @@
 /*
- * OS-9/68k RBF: volume mount, format, allocation bitmap, dates
+ * OS-9/68k and OS-9/6809 RBF: volume mount, format, allocation bitmap,
+ * dates
  */
 
 #include <string.h>
@@ -444,8 +445,8 @@ rbf_volinfo(fs_volume_t *v, fs_volinfo_t *info)
     info->total_blocks = vol->total;
     info->free_blocks  = vol->free_sectors;
     info->read_only    = vol->read_only;
-    info->name_max     = RBF_NAME_MAX;
-    info->fs_type      = FS_FMT_OS9;
+    info->name_max     = vol->name_len;
+    info->fs_type      = vol->fs_type;
     return (FS_OK);
 }
 
@@ -499,7 +500,7 @@ rbf_set_cache(fs_volume_t *v, unsigned buffers)
 }
 
 const struct fs_ops rbf68k_ops = {
-    .name        = "OS-9/68k RBF",
+    .name        = "OS-9/68k or OS-9/6809 RBF",
     .unmount     = rbf_unmount,
     .sync        = rbf_sync,
     .volinfo     = rbf_volinfo,
@@ -579,19 +580,35 @@ rbf_layout_ok(blockdev_t *dev, const uint8_t *lsn0, uint32_t ss, int strict,
     if (blockdev_read_bytes(dev, (uint64_t) seg * ss, 2 * DIR_ENT_SIZE,
                             buf, tmp) != 0)
         return (-1);
+    /* The FD LSN is in the last 3 bytes on OS-9/68k and OS-9/6809 */
     if ((buf[0] != '.') || (buf[1] != ('.' | 0x80)) ||
         (buf[DIR_ENT_SIZE] != ('.' | 0x80)) ||
-        (get32(buf + DIR_ENT_SIZE + DIR_FD) != dir))
+        (get24(buf + DIR_ENT_SIZE + DIR_FD_6809) != dir))
         return (0);
     return (1);
 }
 
+/* LSN 0 fields OS-9/68k added after the OS-9/6809 layout */
+static int
+has_68k_fields(const uint8_t *lsn0)
+{
+    return ((get32(lsn0 + DD_SYNC) == DD_SYNC_CODE) ||
+            (get32(lsn0 + DD_MAPLSN) != 0) ||
+            (get16(lsn0 + DD_LSNSIZE) != 0) ||
+            (get16(lsn0 + DD_VERSID) != 0));
+}
+
 /*
- * Mounts an OS-9/68k RBF filesystem.  The sector size is DD_LSNSIZE
- * when LSN 0 records it.  Older disks leave it 0; then each size from
- * 256 to 4096 bytes is tried (the device block size first) and the
- * first whose layout and root directory check out is used.  If it
- * differs from the device block size, I/O goes through a blockmap.
+ * Mounts an OS-9/68k or OS-9/6809 RBF filesystem.  The sector size is
+ * DD_LSNSIZE when LSN 0 records it.  Older disks leave it 0; then each
+ * size from 256 to 4096 bytes is tried (the device block size first)
+ * and the first whose layout and root directory check out is used.  If
+ * it differs from the device block size, I/O goes through a blockmap.
+ *
+ * A disk with 256-byte sectors whose LSN 0 has none of the OS-9/68k
+ * fields (sync code, sector size, bitmap LSN, version) is OS-9/6809.
+ * If no sector size fits, the OS-9/6809 half-sector layout (each
+ * sector in the first 256 bytes of its own device block) is tried.
  */
 int
 rbf68k_mount(blockdev_t *dev, unsigned cache_buffers, fs_volume_t **vp)
@@ -608,6 +625,8 @@ rbf68k_mount(blockdev_t *dev, unsigned cache_buffers, fs_volume_t **vp)
     uint32_t   tot, bit, map, dir, lsnsize;
     int        rc;
     int        ok = 0;
+    int        half = 0;
+    int        ext;
 
     *vp = NULL;
     if (!log2_exact(dss, &ss_shift) || (dss < 256) || (dss > 4096))
@@ -625,23 +644,43 @@ rbf68k_mount(blockdev_t *dev, unsigned cache_buffers, fs_volume_t **vp)
         goto fail;
 
     rc = FS_ENOTFS;
+    ext = has_68k_fields(lsn0);
     lsnsize = get16(lsn0 + DD_LSNSIZE);
     if (lsnsize != 0) {
+        /* Not a sector size: something else (e.g. PC boot code) */
         if (!log2_exact(lsnsize, &ss_shift) || (lsnsize < 256) ||
-            (lsnsize > 4096)) {
-            rc = FS_ESECTSIZE;
+            (lsnsize > 4096))
             goto fail;
-        }
         ss = lsnsize;
         ok = rbf_layout_ok(dev, lsn0, ss, 0, buf, tmp);
     } else {
+        /*
+         * Without the OS-9/68k fields the disk is most likely OS-9/6809
+         * (or early OS-9/68k), both of which have 256-byte sectors, so
+         * 256 is tried first, then the half-sector layout.  On a device
+         * with larger blocks, a half-sector disk would also pass as one
+         * with device-sized sectors, so this order matters.
+         */
+        uint32_t first = ext ? dss : 256;
         uint32_t try;
 
-        ok = rbf_layout_ok(dev, lsn0, dss, 1, buf, tmp);
+        ok = rbf_layout_ok(dev, lsn0, first, 1, buf, tmp);
         if (ok > 0)
-            ss = dss;
+            ss = first;
+        if ((ok == 0) && !ext && (dss > 256)) {
+            blockmap_t hm;
+
+            if (blockmap_init_sparse(&hm, dev, 256) == 0) {
+                ok = rbf_layout_ok(&hm.bd, lsn0, 256, 1, buf, tmp);
+                blockmap_destroy(&hm);
+                if (ok > 0) {
+                    ss = 256;
+                    half = 1;
+                }
+            }
+        }
         for (try = 256; (ok == 0) && (try <= 4096); try <<= 1) {
-            if (try == dss)
+            if (try == first)
                 continue;
             ok = rbf_layout_ok(dev, lsn0, try, 1, buf, tmp);
             if (ok > 0)
@@ -666,7 +705,14 @@ rbf68k_mount(blockdev_t *dev, unsigned cache_buffers, fs_volume_t **vp)
     vol = fsp_alloc(sizeof (*vol));
     if (vol == NULL)
         goto fail;
-    if (ss != dss) {
+    if (half) {
+        if (blockmap_init_sparse(&vol->map, dev, ss) != 0)
+            goto fail;
+        vol->mapped = 1;
+        vdev = &vol->map.bd;
+        fsp_log("rbf: %lu-byte sectors in %lu-byte device blocks\n",
+                (unsigned long) ss, (unsigned long) dss);
+    } else if (ss != dss) {
         if (blockmap_init(&vol->map, dev, ss) != 0)
             goto fail;
         vol->mapped = 1;
@@ -698,6 +744,13 @@ rbf68k_mount(blockdev_t *dev, unsigned cache_buffers, fs_volume_t **vp)
     vol->free_sectors  = FREE_UNKNOWN;
     vol->max_segs      = (ss - FD_SEG) / FD_SEG_SIZE;
     vol->read_only     = dev->read_only;
+    if ((ss == 256) && !ext) {
+        vol->fs_type  = FS_FMT_OS9_6809;
+        vol->name_len = DIR_NAME_LEN_6809;
+    } else {
+        vol->fs_type  = FS_FMT_OS9;
+        vol->name_len = DIR_NAME_LEN;
+    }
     fsp_free(buf, 4096);
     fsp_free(tmp, dss);
     *vp = &vol->base;
@@ -738,13 +791,24 @@ rbf68k_format(blockdev_t *dev, const fs_format_opts_t *opts)
     uint8_t *buf;
     uint8_t  date[5];
     uint32_t disk_id;
+    uint32_t owner;
     const char *name = (opts->name != NULL) ? opts->name : "OS-9";
+    int      is6809 = (opts->fs_type == FS_FMT_OS9_6809);
+    int      name_len = is6809 ? DIR_NAME_LEN_6809 : DIR_NAME_LEN;
     int      rc;
 
     if (dev->read_only)
         return (FS_EROFS);
-    if (!log2_exact(ss, &ss_shift) || (ss < 256) || (ss > 4096))
+    if (!log2_exact(ss, &ss_shift) || (ss < 256) || (ss > 4096) ||
+        (is6809 && (ss != 256)))
         return (FS_ESECTSIZE);
+    /* Owner is group.user, one byte each, or a 16-bit user number */
+    owner = ((uint32_t) opts->owner_group << 8) + opts->owner_user;
+    if ((owner > 0xffff) ||
+        ((opts->owner_group != 0) && (opts->owner_user > 0xff)))
+        return (FS_EINVAL);
+    if (opts->disk_id_set && (opts->disk_id > 0xffff))
+        return (FS_EINVAL);
     if (!log2_exact(cluster, &cl_shift) || (cluster > 0x8000))
         return (FS_EINVAL);
     if (rbf_valid_volname(name) != FS_OK)
@@ -776,7 +840,7 @@ rbf68k_format(blockdev_t *dev, const fs_format_opts_t *opts)
 
     rbf_time_to_date(fsp_now(), date, 5);
     disk_id = opts->disk_id;
-    if (disk_id == 0)
+    if (!opts->disk_id_set && (disk_id == 0))
         disk_id = ((fsp_now() * 2654435761UL) >> 16) | 1;
 
     /* Bitmap: system area and root directory used, beyond media used */
@@ -799,10 +863,15 @@ rbf68k_format(blockdev_t *dev, const fs_format_opts_t *opts)
     for (i = 0; i < dir_len; i++) {
         memset(buf, 0, ss);
         if (i == 0) {
-            rbf_encode_name("..", buf, DIR_NAME_LEN);
-            put32(buf + DIR_FD, root_fd);
-            rbf_encode_name(".", buf + DIR_ENT_SIZE, DIR_NAME_LEN);
-            put32(buf + DIR_ENT_SIZE + DIR_FD, root_fd);
+            rbf_encode_name("..", buf, name_len);
+            rbf_encode_name(".", buf + DIR_ENT_SIZE, name_len);
+            if (is6809) {
+                put24(buf + DIR_FD_6809, root_fd);
+                put24(buf + DIR_ENT_SIZE + DIR_FD_6809, root_fd);
+            } else {
+                put32(buf + DIR_FD, root_fd);
+                put32(buf + DIR_ENT_SIZE + DIR_FD, root_fd);
+            }
         }
         if (dev->write(dev, dir_lsn + i, 1, buf) != 0)
             goto done;
@@ -813,6 +882,7 @@ rbf68k_format(blockdev_t *dev, const fs_format_opts_t *opts)
     buf[FD_ATT] = FS_ATTR_DIR | FS_ATTR_PEXEC | FS_ATTR_PWRITE |
                   FS_ATTR_PREAD | FS_ATTR_EXEC | FS_ATTR_WRITE |
                   FS_ATTR_READ;
+    put16(buf + FD_OWN, owner);
     memcpy(buf + FD_DAT, date, 5);
     buf[FD_LNK] = 1;
     put32(buf + FD_SIZ, 2 * DIR_ENT_SIZE);
@@ -829,6 +899,7 @@ rbf68k_format(blockdev_t *dev, const fs_format_opts_t *opts)
     put16(buf + DD_MAP, map_bytes);
     put16(buf + DD_BIT, cluster);
     put24(buf + DD_DIR, root_fd);
+    put16(buf + DD_OWN, owner);
     buf[DD_ATT] = FS_ATTR_DIR | (FS_ATTR_PERMS & ~FS_ATTR_NONSHARE);
     put16(buf + DD_DSK, disk_id);
     buf[DD_FMT] = FMT_DD | ((opts->heads > 1) ? FMT_DS : 0) |
@@ -837,10 +908,12 @@ rbf68k_format(blockdev_t *dev, const fs_format_opts_t *opts)
     memcpy(buf + DD_DATE, date, 5);
     rbf_encode_name(name, buf + DD_NAME, DD_NAME_LEN);
     buf[DD_OPT] = 1;                        /* PD_DTP: DT_RBF */
-    put32(buf + DD_SYNC, DD_SYNC_CODE);
-    put32(buf + DD_MAPLSN, 1);
-    put16(buf + DD_LSNSIZE, ss);
-    put16(buf + DD_VERSID, 1);
+    if (!is6809) {                          /* OS-9/68k additions */
+        put32(buf + DD_SYNC, DD_SYNC_CODE);
+        put32(buf + DD_MAPLSN, 1);
+        put16(buf + DD_LSNSIZE, ss);
+        put16(buf + DD_VERSID, 1);
+    }
     if (dev->write(dev, 0, 1, buf) != 0)
         goto done;
     if ((dev->sync != NULL) && (dev->sync(dev) != 0))

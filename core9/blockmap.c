@@ -47,8 +47,9 @@ blockdev_read_bytes(blockdev_t *dev, uint64_t off, uint32_t len, void *buf,
 
 /*
  * Moves count logical sectors.  When logical sectors are at least as
- * large as device blocks, each is a whole number of blocks; otherwise
- * whole device blocks move directly and partial blocks go through buf.
+ * large as device blocks (and there is no offset), each is a whole
+ * number of blocks; otherwise whole device blocks move directly and
+ * partial blocks go through buf.
  */
 static int
 bm_xfer(blockmap_t *bm, int write, uint32_t lsn, uint32_t count,
@@ -61,13 +62,30 @@ bm_xfer(blockmap_t *bm, int write, uint32_t lsn, uint32_t count,
 
     if ((uint64_t) lsn + count > bm->bd.sector_count)
         return (-1);
-    if (bm->shift >= bm->dev_shift) {
+    if (bm->sparse) {
+        uint32_t ls = bm->bd.sector_size;
+
+        for (; count > 0; count--, lsn++, data += ls) {
+            if (write) {
+                memcpy(bm->buf, data, ls);
+                memset(bm->buf + ls, 0, ds - ls);
+                if (dev->write(dev, lsn, 1, bm->buf) != 0)
+                    return (-1);
+            } else {
+                if (dev->read(dev, lsn, 1, bm->buf) != 0)
+                    return (-1);
+                memcpy(data, bm->buf, ls);
+            }
+        }
+        return (0);
+    }
+    if ((bm->shift >= bm->dev_shift) && (bm->base == 0)) {
         uint8_t r = bm->shift - bm->dev_shift;
         return (write ? dev->write(dev, lsn << r, count << r, data) :
                         dev->read(dev, lsn << r, count << r, data));
     }
 
-    off = (uint64_t) lsn << bm->shift;
+    off = ((uint64_t) lsn << bm->shift) + bm->base;
     end = off + ((uint64_t) count << bm->shift);
     while (off < end) {
         uint32_t blk    = (uint32_t) (off >> bm->dev_shift);
@@ -143,6 +161,39 @@ blockmap_init(blockmap_t *bm, blockdev_t *dev, uint32_t sector_size)
     bm->bd.read         = bm_read;
     bm->bd.write        = bm_write;
     bm->bd.sync         = bm_sync;
+    return (0);
+}
+
+int
+blockmap_init_sparse(blockmap_t *bm, blockdev_t *dev, uint32_t sector_size)
+{
+    if ((sector_size >= dev->sector_size) ||
+        (blockmap_init(bm, dev, sector_size) != 0))
+        return (-1);
+    bm->sparse = 1;
+    bm->bd.sector_count = dev->sector_count;
+    return (0);
+}
+
+int
+blockmap_init_offset(blockmap_t *bm, blockdev_t *dev, uint32_t sector_size,
+                     uint64_t base, uint64_t length)
+{
+    uint64_t bytes = (uint64_t) dev->sector_count * dev->sector_size;
+
+    if ((base == 0) || (base >= bytes) ||
+        (blockmap_init(bm, dev, sector_size) != 0))
+        return (-1);
+    bytes -= base;
+    if ((length != 0) && (length < bytes))
+        bytes = length;
+    if (bm->buf == NULL) {
+        bm->buf = fsp_alloc(dev->sector_size);
+        if (bm->buf == NULL)
+            return (-1);
+    }
+    bm->base = base;
+    bm->bd.sector_count = (uint32_t) (bytes >> bm->shift);
     return (0);
 }
 

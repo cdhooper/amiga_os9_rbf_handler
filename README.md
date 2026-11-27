@@ -1,12 +1,14 @@
 # os9-rbf-handler: OS-9 RBF filesystem for AmigaOS
 
-An AmigaOS filesystem handler for OS-9 RBF disks: floppies and hard disk
-partitions written by OS-9/68k or by OS-9000 (big- or little-endian, e.g.
-x86 OS-9000 disks) can be read and written from AmigaOS, and AmigaOS can
-format new ones in any of the three formats. The RBF code is a C
-reimplementation of the OS-9/68k RBF file manager (edition 104) and an
-independent implementation of the OS-9000 RBF disk format, structured as a
-portable core that the handler links statically. One handler serves both;
+An AmigaOS filesystem handler for OS-9 RBF disks: floppies, disk images
+and hard disk partitions written by OS-9/6809 (including NitrOS-9 and the
+CoCo half-sector hard disk layout), by OS-9/68k or by OS-9000 (big- or
+little-endian, e.g. x86 OS-9000 disks) can be read and written from
+AmigaOS, and AmigaOS can format new ones in any of the four formats. The
+RBF code is a C reimplementation of the OS-9/68k RBF file manager (edition
+104), which also handles the OS-9/6809 layout, and an independent
+implementation of the OS-9000 RBF disk format, structured as a portable
+core that the handler links statically. One handler serves all of them;
 the format of a disk is detected when it is mounted.
 
 Requirements: Kickstart/Workbench 2.04 or later, any 68000+ CPU, and a
@@ -20,7 +22,7 @@ trackdisk-style exec device (trackdisk.device, scsi.device, uaehf.device, ...).
 | `core9/blockdev.h` | Block device and platform service interface |
 | `core9/cache.[ch]` | Write-back sector cache (LRU) |
 | `core9/blockmap.[ch]` | Filesystem block size different from the device's |
-| `core9/rbf68k.h` | OS-9/68k on-disk layout and internal interfaces |
+| `core9/rbf68k.h` | OS-9/68k and OS-9/6809 on-disk layout and internal interfaces |
 | `core9/rbf68k_vol.c` | Mount, format, allocation bitmap, dates |
 | `core9/rbf68k_node.c` | File descriptors and segment lists (grow, trim, map) |
 | `core9/rbf68k_file.c` | File data I/O |
@@ -70,7 +72,7 @@ Copy `objs/os9-rbf-handler` to `L:`. A mountlist entry for an OS-9 floppy in DF0
         StackSize      = 8192
         Priority       = 10
         GlobVec        = -1
-        DosType        = 0x4F533900
+        DosType        = 0x4F533901
         FileSystem     = L:os9-rbf-handler
         Activate       = 1
     #
@@ -82,39 +84,74 @@ cylinder range (the OS-9 partitions made by `tools/mkrdb.py` use 16 heads,
 least 8192 are required.
 
 For hard disks the usual way is to put the handler in the RDB as the
-filesystem for DosType `OS9\0`; Kickstart then mounts OS-9 partitions at
-boot. With amitools:
+filesystem for the partitions' DosType (`OS9\1` for OS-9/68k); Kickstart
+then mounts OS-9 partitions at boot. With amitools:
 
-    rdbtool disk.hdf fsadd objs/os9-rbf-handler dostype=0x4F533900 version=1.0 \
+    rdbtool disk.hdf fsadd objs/os9-rbf-handler dostype=0x4F533901 version=1.1 \
             stack_size=8192 global_vec=0xffffffff
 
 and give the partitions the automount flag (HDToolBox can do the same). For
-OS-9000 partitions, add the same file again for DosTypes `0x4F533901` and/or
-`0x4F533902` (see below).
+partitions of the other types, add the same file again for DosTypes
+`0x4F533900`, `0x4F533902` and/or `0x4F533903` (see below).
 
 ### DosTypes and Format
 
 | DosType | Format writes |
 |---|---|
-| `0x4F533900` `OS9\0` | OS-9/68k RBF |
-| `0x4F533901` `OS9\1` (`ID_OS9K_DISK_BE`) | OS-9000 RBF, big-endian |
-| `0x4F533902` `OS9\2` (`ID_OS9K_DISK_LE`) | OS-9000 RBF, little-endian |
+| `0x4F533900` `OS9\0` | OS-9/6809 RBF |
+| `0x4F533901` `OS9\1` | OS-9/68k RBF |
+| `0x4F533902` `OS9\2` | OS-9000 RBF, big-endian |
+| `0x4F533903` `OS9\3` | OS-9000 RBF, little-endian |
 
-The DosType only chooses what **Format** writes: the handler uses the type
-Format sends if it is one of these, otherwise (e.g. when Format is given
-`FFS` or `OFS`) the DosType of the mount entry or partition. Any other type
-formats OS-9/68k. **Mounting ignores the DosType**: every disk is probed for
-OS-9000 first (its ID block has a sync code), then for OS-9/68k, so a
-partition of any of the three types mounts whatever RBF format it holds. The
-volume node and `Info` report the type of the mounted disk.
+Version 1.0 used `OS9\0` for OS-9/68k and `OS9\1`/`OS9\2` for OS-9000.
+Mount entries and RDB partitions made for it still mount their disks (the
+DosType does not affect mounting), but Format now writes the type in this
+table, so change their DosType before formatting them.
+
+The DosType only chooses what **Format** writes by default: the handler
+uses the type Format sends if it is one of these, otherwise (e.g. when
+Format is given `FFS` or `OFS`) the DosType of the mount entry or
+partition. Any other type formats OS-9/68k. **Mounting ignores the
+DosType**: every disk is probed for OS-9000 first (its ID block has a sync
+code), then for OS-9/68k and OS-9/6809, so a partition of any type mounts
+whatever RBF format it holds. The volume node reports the type of the
+mounted disk.
+
+### Format options
+
+Options can follow the volume name given to Format, separated by `,`, `|`
+or `/`:
+
+    Format DRIVE OD0: NAME "CoCo,6809,half" QUICK NOICONS
+    Format DRIVE OD0: NAME "Work,le,ss=1024" QUICK NOICONS
+
+| Option | Meaning |
+|---|---|
+| `6809`, `68k` | OS-9/6809 or OS-9/68k RBF |
+| `9k` (`os9k`), `be`, `le` | OS-9000 RBF; `be` and `le` choose the byte order (`9k` keeps the DosType's, else big-endian) |
+| `ssize=<n>` (`ss=`) | Sector (OS-9000: block) size in bytes, 256-4096; default 256 for OS-9/6809, otherwise the device block size |
+| `cluster=<n>` (`cl=`) | Sectors per bitmap bit, a power of 2 (not OS-9000); default 1, larger if needed to keep the bitmap within 64K bytes |
+| `id=<hex>` | Disk ID (16 bits except on OS-9000); default from the time |
+| `owner=<g>.<u>` (`own=`) | Owner of the volume and root directory; `owner=<n>` is user `n` of group 0 (a 16-bit user number on OS-9/6809) |
+| `half` | OS-9/6809 half-sector layout (see below) |
+
+Option names are not case sensitive, and a later option overrides an
+earlier one. An unknown option, a bad value, or a combination the type
+cannot have (e.g. `6809,ss=512` or `le,cl=2`) makes Format fail with "bad
+template", leaving the disk unchanged.
+
+AmigaOS 3.2 Format (47.11) refuses a name containing `/` or longer than 30
+characters before the handler sees it, so use `,` or `|` with it and keep
+the name and options within 30 characters. (OS-9/6809 and OS-9/68k volume
+names can be 32 characters, OS-9000 ones 31.)
 Without a filesystem for `OS9\0` in the RDB, OS-9 partitions should not be
 marked automount or bootable: Kickstart 3.2.2's A3000 `scsi.device` then
 goes into a reboot loop (`mkrdb.py` currently sets both flags on the first
 OS-9 partition).
 
-The RBF sector size is the device block size (`SectorSize`/`BlockSize`):
-256, 512, 1024, 2048 or 4096 bytes. A disk whose LSN 0 records a different
-logical sector size is not mounted.
+The RBF sector size is the one LSN 0 records (DD_LSNSIZE), or is found by
+trying 256 to 4096 bytes on disks that do not record it; if it differs
+from the device block size (`SectorSize`/`BlockSize`), I/O is mapped.
 
 ## How OS-9 files appear in AmigaOS
 
@@ -153,6 +190,29 @@ file is created and is not visible from AmigaOS.
 writes a new filesystem using the mountlist geometry, choosing a cluster size
 that keeps the bitmap within 64K bytes.
 
+### OS-9/6809 disks
+
+* **Recognition**: a disk with 256-byte sectors whose LSN 0 has none of
+  the fields OS-9/68k added (sync code `Cruz`, sector size, bitmap LSN,
+  version) is OS-9/6809. Early OS-9/68k disks without those fields are
+  therefore treated as OS-9/6809 too; the only difference is that
+  29-character names are then allowed.
+* **Sectors** are 256 bytes. On a device with 512-byte (or larger) blocks,
+  a disk image stores them packed, two per block. CoCo hard disk drivers
+  (SuperIDE, SDC and many SCSI interfaces) instead put each sector in the
+  first half of its own block and leave the rest unused: if a disk is not
+  found packed, this half-sector layout is tried. Format writes it with
+  the `half` option; the unused halves are written as zeros.
+* **Names** are up to 29 characters: a directory entry has 29 name bytes
+  and a 3-byte FD LSN.
+* **Owner**: the FD's 16-bit owner is shown as GID (high byte) and UID
+  (low byte), as on OS-9/68k.
+* **Format** writes the same layout as for OS-9/68k, without the
+  OS-9/68k fields in LSN 0. No boot track or OS9Boot file is written.
+* Amiga floppy drives cannot read or write the CoCo's 256-byte-sector
+  floppies, so OS-9/6809 floppies are used as image files (e.g. through
+  `trackfile.device`) or copied to hard disk partitions.
+
 ### OS-9000 disks
 
 * **Byte order**: from the ID block's end flag (`B`/`L`); all numbers on the
@@ -176,13 +236,24 @@ that keeps the bitmap within 64K bytes.
   one byte behind a zero, as OS-9000 does.
 * **Format** writes the ID block at block 0, the bitmap FD at 1, the root
   directory FD at 2, then the bitmap and the root directory. Times count
-  from 1970.
+  from 1970. The bitmap has one bit per block, so `cluster=` is refused.
 * Symbolic links appear as ordinary files holding the target path; they
   cannot be created from AmigaOS. The boot file fields of the ID block are
   kept but not maintained.
-* PC disks: OS-9000 on x86 puts the ID block in the second sector of the
-  partition (the first holds the boot loader), so the mount entry must start
-  one block later than the partition.
+* PC disks: OS-9000 on x86 puts the ID block in the second 512-byte sector
+  of the disk or partition (the first holds the PC boot loader) and numbers
+  blocks from there. When block 0 has no ID block sync code, the handler
+  looks for one at byte 512 and, if found, offsets all I/O by 512 bytes, so
+  x86 floppy and partition images mount as they are. `rbfcheck` does the
+  same unless `-o` is given.
+* Whole PC hard disks: if nothing at block 0 is RBF and block 0 holds a
+  plausible MBR partition table, each primary partition is tried in turn
+  (any filesystem type, any partition type byte) and the first that holds
+  an RBF filesystem is mounted; I/O is then confined to that partition.
+  The table must be entirely plausible (boot flags 0x00 or 0x80, every
+  entry inside the disk), because PC floppy boot sectors also end in
+  0x55AA. Extended partitions and GPT disks are not searched. Formatting
+  writes over the whole device, MBR included.
 
 ## Design notes
 
@@ -193,8 +264,13 @@ that keeps the bitmap within 64K bytes.
 * The core API (`fs_api.h`) identifies objects by node (the FD's LSN),
   iterates directories with a byte-position cookie, and knows nothing about
   AmigaDOS. The two backends sit behind `struct fs_ops`: `fs_mount()`
-  probes OS-9000 (`core9k/`) and then OS-9/68k (`core9/`); `fs_format()`
-  writes the one `fs_format_opts.fs_type` names.
+  probes OS-9000 (`core9k/`) and then OS-9/68k and OS-9/6809 (`core9/`),
+  then the same in each MBR partition, through an offset blockmap the
+  volume keeps until `fs_unmount()`;
+  `fs_format()` writes the one `fs_format_opts.fs_type` names, through a
+  blockmap if its sector size differs from the device's.
+  `fs_parse_format_opts()` splits options from a volume name; the handler
+  and `rbftool format` both use it.
 * The OS-9000 backend was written from the on-disk format alone; it shares
   no code with the OS-9000 RBF file manager.
 * Every user of an FD shares one in-memory node, so open files and directory
@@ -242,6 +318,16 @@ fragmented over several FD blocks are written, shrunk and removed. With
 OS-9000 disk and writes to a copy of it; an x86 OS-9000 hard disk image
 (little-endian, 3360 objects) checks clean, its files read back identical to
 an independent reader, and files written to it check clean.
+
+OS-9/6809 (`rbftool -f 6809`, `stress.py --fs 6809 [--half]`): the stress
+and disk-full tests run with 256-byte sectors on 256-byte devices, packed
+on 512-byte devices, and in the half-sector layout on 512- and 1024-byte
+devices (`rbfcheck -H <blocksize>` checks that layout). Format option
+strings are checked for the type and sector size they produce, and bad
+ones for being refused. With `OS9_6809_DISKS=<dir>` each OS-9/6809 `.dsk`
+image there is read (`tests/modcrc.py` checks the CRC of every 6809 module
+in its files) and a copy is written to; the CoCo 3 OS-9 Level II boot and
+Development Pack disks read with all module CRCs good.
 
 With `OS9DCHECK=<path to os9dcheck>` (a Linux build of Microware's OS-9000
 dcheck, e.g. `bin.linux/os9dcheck` in the tools tree), the fragmented-file

@@ -1,14 +1,25 @@
 /*
- * rbfcheck - check an OS-9/68k or OS-9000 RBF filesystem image
+ * rbfcheck - check an OS-9/68k, OS-9/6809 or OS-9000 RBF filesystem image
  *
  * An independent implementation of the checks OS-9 dcheck makes; it does
  * not use the filesystem core, so the core's mistakes cannot hide here.
  *
- * usage: rbfcheck [-s secsize] [-o offset] [-q] <image>
+ * usage: rbfcheck [-s secsize] [-o offset] [-6] [-H blocksize] [-q] <image>
+ *
+ * With 256-byte sectors, an image whose LSN 0 lacks the OS-9/68k fields
+ * (sync code, sector size, bitmap LSN, version) is checked as OS-9/6809:
+ * directory entries hold 29 name bytes and a 3-byte FD LSN.  -6 forces
+ * that.  -H checks an OS-9/6809 half-sector image: each 256-byte sector
+ * at the start of its own block of the given size.
  *
  * An image whose first block carries the OS-9000 ID block sync code is
  * checked by check9k() (rbfcheck9k.c); its block size comes from the ID
- * block, so -s does not apply.
+ * block, so -s does not apply.  Without -o, an image whose ID block is
+ * in its second 512-byte sector (x86 OS-9000, after the PC boot sector)
+ * is found there.  An image whose block 0 is a valid MBR partition
+ * table is checked in its first primary partition holding an OS-9000
+ * ID block (at its start or 512 bytes in), or else its first primary
+ * partition, checked as OS-9/68k.
  *
  * Checks:
  *  - LSN 0 layout fields
@@ -45,6 +56,8 @@ static uint8_t *refs;               /* Per sector: references to an FD */
 static uint8_t *seen;               /* Per sector: FD already checked */
 static int      errors;
 static int      quiet;
+static int      is6809;             /* 29-byte names, 3-byte FD LSN */
+static uint32_t half_bs;            /* Half-sector layout: block size */
 
 int check9k(int fd_img, uint64_t off, int quiet);
 
@@ -59,8 +72,54 @@ static uint32_t g32(const uint8_t *p)
 static int
 rd(uint32_t lsn, uint8_t *buf)
 {
-    off_t off = img_offset + (off_t) lsn * ss;
+    off_t off = img_offset + (off_t) lsn * (half_bs ? half_bs : ss);
     return (pread(fd_img, buf, ss, off) == (ssize_t) ss) ? 0 : -1;
+}
+
+static int
+is_idb_at(uint64_t off)
+{
+    uint8_t id[4];
+
+    return ((pread(fd_img, id, 4, off) == 4) && (id[0] == 0xad) &&
+            (id[1] == 0xb0) && (id[2] == 0xb0) && (id[3] == 0xad));
+}
+
+/*
+ * Fills start[] (byte offsets) with the image's primary MBR partitions,
+ * extended and GPT protective entries left out, and returns how many;
+ * 0 if block 0 is not a plausible MBR (PC floppy boot sectors carry the
+ * 0x55aa signature too, with code where the table would be).
+ */
+static int
+mbr_partitions(uint64_t start[4])
+{
+    uint8_t mbr[512];
+    off_t   size = lseek(fd_img, 0, SEEK_END);
+    int     n = 0;
+    int     i;
+
+    if ((pread(fd_img, mbr, 512, 0) != 512) || (mbr[510] != 0x55) ||
+        (mbr[511] != 0xaa))
+        return (0);
+    for (i = 0; i < 4; i++) {
+        const uint8_t *e = mbr + 446 + 16 * i;
+        uint64_t lba = e[8] | (e[9] << 8) | (e[10] << 16) |
+                       ((uint64_t) e[11] << 24);
+        uint64_t cnt = e[12] | (e[13] << 8) | (e[14] << 16) |
+                       ((uint64_t) e[15] << 24);
+
+        if ((e[0] != 0x00) && (e[0] != 0x80))
+            return (0);
+        if (e[4] == 0)
+            continue;
+        if ((lba == 0) || (cnt == 0) || ((lba + cnt) * 512 > (uint64_t) size))
+            return (0);
+        if ((e[4] != 0x05) && (e[4] != 0x0f) && (e[4] != 0x85) &&
+            (e[4] != 0xee))
+            start[n++] = lba * 512;
+    }
+    return (n);
 }
 
 static int
@@ -84,6 +143,13 @@ claim(uint32_t lsn, uint32_t count, uint32_t who, const char *what)
             return;
         }
     }
+}
+
+/* FD LSN of a directory entry */
+static uint32_t
+ent_fd(const uint8_t *e)
+{
+    return (is6809 ? g24(e + 29) : g32(e + 28));
 }
 
 static void
@@ -248,13 +314,14 @@ check_fd(uint32_t lsn, uint32_t parent, const char *path, int expect_dir)
         } else {
             if ((data[0] != '.') || (data[1] != ('.' | 0x80)))
                 ERR("%s: first entry is not ..\n", path);
-            else if (g32(data + 28) != parent)
-                ERR("%s: .. is %u, expected %u\n", path, g32(data + 28),
+            else if (ent_fd(data) != parent)
+                ERR("%s: .. is %u, expected %u\n", path, ent_fd(data),
                     parent);
             if (data[32] != ('.' | 0x80))
                 ERR("%s: second entry is not .\n", path);
-            else if (g32(data + 32 + 28) != lsn)
-                ERR("%s: . is %u, expected %u\n", path, g32(data + 60), lsn);
+            else if (ent_fd(data + 32) != lsn)
+                ERR("%s: . is %u, expected %u\n", path, ent_fd(data + 32),
+                    lsn);
         }
         for (pos = 64; pos + 32 <= size; pos += 32) {
             const uint8_t *e = data + pos;
@@ -266,7 +333,7 @@ check_fd(uint32_t lsn, uint32_t parent, const char *path, int expect_dir)
 
             if (e[0] == 0)
                 continue;
-            decode(e, 28, name, &bad);
+            decode(e, is6809 ? 29 : 28, name, &bad);
             if (bad)
                 ERR("%s: entry at %u has an unterminated name\n", path, pos);
             for (k = 0; name[k]; k++) {
@@ -277,7 +344,7 @@ check_fd(uint32_t lsn, uint32_t parent, const char *path, int expect_dir)
                       (c == '_') || (c == '.') || (c == '$')))
                     ERR("%s: name \"%s\" has illegal character\n", path, name);
             }
-            child = g32(e + 28);
+            child = ent_fd(e);
             snprintf(sub, sizeof (sub), "%s/%s", path, name);
             if ((child < 1 + map_sectors) || (child >= tot)) {
                 ERR("%s: FD %u out of range\n", sub, child);
@@ -297,7 +364,8 @@ check_fd(uint32_t lsn, uint32_t parent, const char *path, int expect_dir)
 static void
 usage(void)
 {
-    fprintf(stderr, "usage: rbfcheck [-s secsize] [-o offset] [-q] <image>\n");
+    fprintf(stderr, "usage: rbfcheck [-s secsize] [-o offset] [-6] "
+            "[-H blocksize] [-q] <image>\n");
     exit(2);
 }
 
@@ -311,14 +379,25 @@ main(int argc, char **argv)
     uint32_t missing = 0;
     uint32_t used = 0;
     int      opt;
+    int      opt_offset = 0;
 
-    while ((opt = getopt(argc, argv, "s:o:q")) != -1) {
+    while ((opt = getopt(argc, argv, "s:o:q6H:")) != -1) {
         switch (opt) {
             case 's': ss = strtoul(optarg, NULL, 0); break;
-            case 'o': img_offset = strtoull(optarg, NULL, 0); break;
+            case '6': is6809 = 1; break;
+            case 'H': half_bs = strtoul(optarg, NULL, 0); break;
+            case 'o': img_offset = strtoull(optarg, NULL, 0);
+                      opt_offset = 1;
+                      break;
             case 'q': quiet = 1; break;
             default:  usage();
         }
+    }
+    if (half_bs != 0) {
+        ss = 256;
+        is6809 = 1;
+        if ((half_bs <= 256) || (half_bs & (half_bs - 1)))
+            usage();
     }
     if ((optind != argc - 1) || (ss < 256) || (ss > 4096) || (ss & (ss - 1)))
         usage();
@@ -330,12 +409,36 @@ main(int argc, char **argv)
     if ((lsn0[0] == 0xad) && (lsn0[1] == 0xb0) && (lsn0[2] == 0xb0) &&
         (lsn0[3] == 0xad))
         return (check9k(fd_img, img_offset, quiet));
+    if (!opt_offset) {
+        uint64_t part[4];
+        int      nparts;
+
+        if (is_idb_at(512))
+            return (check9k(fd_img, 512, quiet));
+        nparts = mbr_partitions(part);
+        for (i = 0; i < (uint32_t) nparts; i++) {
+            if (is_idb_at(part[i]))
+                return (check9k(fd_img, part[i], quiet));
+            if (is_idb_at(part[i] + 512))
+                return (check9k(fd_img, part[i] + 512, quiet));
+        }
+        if (nparts > 0) {
+            img_offset = part[0];
+            if (rd(0, lsn0) != 0) {
+                perror(argv[optind]);
+                return (2);
+            }
+        }
+    }
 
     tot       = g24(lsn0 + 0);
     map_bytes = g16(lsn0 + 4);
     cluster   = g16(lsn0 + 6);
     root      = g24(lsn0 + 8);
     lsnsize   = g16(lsn0 + 0x68);
+    if ((ss == 256) && (g32(lsn0 + 0x60) != 0x4372757a) &&
+        (g32(lsn0 + 0x64) == 0) && (lsnsize == 0) && (g16(lsn0 + 0x6a) == 0))
+        is6809 = 1;
     if (cluster == 0)
         cluster = 1;
     if (cluster & (cluster - 1)) {
