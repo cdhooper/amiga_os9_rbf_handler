@@ -9,6 +9,7 @@
 #
 
 VER	   ?= 1.1+
+VER_DATE   ?= $(shell date +%Y-%m-%d)
 
 AMIGA_GCC  ?= /opt/amiga162rc26
 AMIGA_BIN  := $(AMIGA_GCC)/bin
@@ -39,7 +40,8 @@ HANDLER    := $(OBJDIR)/os9-rbf-handler
 
 CFLAGS_AMIGA := -m68000 -Os -Wall -Wextra -Wno-pointer-sign \
                 -Wno-sign-compare -fomit-frame-pointer -fno-builtin-printf \
-                -fno-toplevel-reorder -Icore9 -Icore9k -Iamiga
+                -fno-toplevel-reorder -Icore9 -Icore9k -Iamiga \
+                -DVER='"$(VER)"' -DVER_DATE='"$(VER_DATE)"'
 ifdef DEBUG
 CFLAGS_AMIGA += -DDEBUG
 AMIGA_SRCS   += amiga/printf.c     # serial debug output
@@ -61,6 +63,9 @@ AMIGA_OBJS := $(patsubst %.c,$(OBJDIR)/%.o,$(AMIGA_SRCS) $(CORE_SRCS))
 $(OBJDIR)/%.o: %.c $(CORE_HDRS) $(AMIGA_HDRS)
 	@mkdir -p $(dir $@)
 	$(CC_AMIGA) $(CFLAGS_AMIGA) -c $< -o $@
+
+# handler.c embeds VER and VER_DATE from this Makefile
+$(OBJDIR)/amiga/handler.o: Makefile
 
 $(HANDLER).debug: $(AMIGA_OBJS)
 	$(CC_AMIGA) $(CFLAGS_AMIGA) $(LDFLAGS_AMIGA) -o $@ $(AMIGA_OBJS) \

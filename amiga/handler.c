@@ -15,7 +15,14 @@
 #include <proto/dos.h>
 #include "handler.h"
 
-const char         rbf_version[] = "$VER: os9-rbf-handler 1.0 (2026-11-19)";
+#ifndef VER
+#define VER "unknown"
+#endif
+#ifndef VER_DATE
+#define VER_DATE __DATE__
+#endif
+
+const char         rbf_version[] = "$VER: os9-rbf-handler " VER " (" VER_DATE ")";
 struct ExecBase   *SysBase;
 struct DosLibrary *DOSBase;
 
