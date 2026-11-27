@@ -8,9 +8,9 @@
 #   make test       run the host test suite
 #
 
-VER	   ?= 1.0+
+VER	   ?= 1.1+
 
-AMIGA_GCC  ?= /opt/amiga162rc25
+AMIGA_GCC  ?= /opt/amiga162rc26
 AMIGA_BIN  := $(AMIGA_GCC)/bin
 CC_AMIGA   := $(AMIGA_BIN)/m68k-amigaos-gcc
 STRIP      := $(AMIGA_BIN)/m68k-amigaos-strip
